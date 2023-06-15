@@ -5,37 +5,35 @@
 #include "./port_audio_stream.h"
 #include "./port_audio_stream_parameter.h"
 
-#include "./px/px_audio_reader.h"
-#include "./px/px_audio_reader_wav.h"
-#include "./px/px_audio_player.h"
-
 #include "./port_audio_test_node.h"
 
-#include <core/class_db.h>
-#include <core/engine.h>
+#include "core/object/class_db.h"
+#include "core/config/engine.h"
 
-static PortAudio *port_audio = NULL;
+static PortAudio *port_audio = nullptr;
 
-void register_portaudio_types() {
+void initialize_portaudio_module(ModuleInitializationLevel p_level) {
 	// Singleton
-	port_audio = memnew(PortAudio);
-	ClassDB::register_class<PortAudio>();
-	Engine::get_singleton()->add_singleton(Engine::Singleton("PortAudio", PortAudio::get_singleton()));
+	if (p_level == MODULE_INITIALIZATION_LEVEL_SERVERS)
+	{
+		port_audio = memnew(PortAudio);
+		GDREGISTER_CLASS(PortAudio);
+		Engine::get_singleton()->add_singleton(Engine::Singleton("PortAudio", PortAudio::get_singleton()));
 
-	// Port Audio
-	ClassDB::register_class<PortAudioStream>();
-	ClassDB::register_class<PortAudioStreamParameter>();
-	ClassDB::register_class<PortAudioCallbackData>();
+		// Port Audio
+		GDREGISTER_CLASS(PortAudioStream);
+		GDREGISTER_CLASS(PortAudioStreamParameter);
+		GDREGISTER_CLASS(PortAudioCallbackData);
 
-	// Port Audio Extended
-	ClassDB::register_class<PxAudioPlayer>();
-	ClassDB::register_virtual_class<PxAudioReader>();
-	ClassDB::register_class<PxAudioReaderWav>();
-
-	// Nodes
-	ClassDB::register_class<PortAudioTestNode>();
+		// Nodes
+		GDREGISTER_CLASS(PortAudioTestNode);
+	}
 }
 
-void unregister_portaudio_types() {
-	memdelete(port_audio);
+void uninitialize_portaudio_module(ModuleInitializationLevel p_level)
+{
+	if (p_level == MODULE_INITIALIZATION_LEVEL_SERVERS)
+	{
+		memdelete(port_audio);
+	}
 }

@@ -1,11 +1,11 @@
 #ifndef PORT_AUDIO_CALLBACK_DATA_H
 #define PORT_AUDIO_CALLBACK_DATA_H
 
-#include <core/io/stream_peer.h>
-#include <core/reference.h>
+#include "core/io/stream_peer.h"
+#include "core/object/ref_counted.h"
 
-class PortAudioCallbackData : public Reference {
-	GDCLASS(PortAudioCallbackData, Reference);
+class PortAudioCallbackData : public RefCounted {
+	GDCLASS(PortAudioCallbackData, RefCounted);
 
 private:
 	double input_buffer_adc_time;
