@@ -13,6 +13,7 @@
 #endif
 
 #include <portaudio.h>
+#include <servers/audio_server.h>
 
 #pragma region IMP_DETAILS
 
@@ -835,9 +836,10 @@ PortAudio::PortAudio() {
 		return;
     }
 
-	const String current_driver = GLOBAL_GET("audio/driver/driver");
+	
+	const String current_driver = AudioDriverManager::get_driver_count() > 0 ? AudioDriverManager::get_driver(0)->get_name() : ""; // GLOBAL_GET("audio/driver/driver");
 	String driver_enums;
-	ProjectSettings::get_singleton()->clear("audio/driver/driver");
+	//ProjectSettings::get_singleton()->clear("audio/driver/driver");
 	for (auto i = 0; i < get_host_api_count(); ++i)
 	{
 		Dictionary host_info = get_host_api_info(i);
@@ -845,9 +847,9 @@ PortAudio::PortAudio() {
 	}
 	if (!current_driver.is_empty())
 		driver_enums += current_driver;
-	else
-		driver_enums.remove_at(driver_enums.length() - 1);
-	GLOBAL_DEF_BASIC(PropertyInfo(Variant::INT, "audio/driver/current_driver", PROPERTY_HINT_ENUM, driver_enums), 0);
+	//else
+	//	driver_enums.remove_at(driver_enums.length() - 1);
+	GLOBAL_DEF_BASIC(PropertyInfo(Variant::INT, "audio/driver/pro_audio_driver", PROPERTY_HINT_ENUM, driver_enums),0);
 }
 
 PortAudio::~PortAudio() {

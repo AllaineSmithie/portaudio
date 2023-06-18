@@ -10,7 +10,7 @@ module_env = env.Clone()
 # Portaudio Setup - Start
 
 # define PA Version
-module_env.Append(CPPDEFINES=[('PA_GIT_REVISION', 'godot-module-396fe4b')])
+module_env.Append(CPPDEFINES=[('PA_GIT_REVISION', 'godot-module-396fe4b'), "_CRT_SECURE_NO_WARNINGS"])
 
 # add to Godot include path allows to use PortAudio directly via `#include <portaudio.h>`
 #env.Append(CPPPATH=["#modules/portaudio/include"])
