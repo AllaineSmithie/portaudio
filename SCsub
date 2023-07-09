@@ -8,7 +8,6 @@ module_env = env.Clone()
 
 
 # Portaudio Setup - Start
-
 # define PA Version
 module_env.Append(CPPDEFINES=[('PA_GIT_REVISION', 'godot-module-396fe4b'), "_CRT_SECURE_NO_WARNINGS"])
 
