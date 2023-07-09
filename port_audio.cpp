@@ -12,10 +12,18 @@
 #include <pa_win_wasapi.h>
 #endif
 
-#include <portaudio.h>
+
+#ifdef WIN32
+ //#ifdef PA_USE_ASIO
+  #include "portaudio/include/pa_asio.h"
+ //#endif
+#endif
+#include "portaudio/include/portaudio.h"
 #include <servers/audio_server.h>
 
 #pragma region IMP_DETAILS
+
+
 
 class CallbackUserDataGdBinding {
 public:
@@ -270,6 +278,16 @@ int PortAudio::get_version() {
     return Pa_GetVersion();
 }
 
+int PortAudio::get_current_driver_idx() const
+{
+	return current_driver_idx;
+}
+/*
+int PortAudio::get_main_stream_sample_size() const
+{
+	return stream_resolution[stream_resolution_idx];
+}
+*/
 String PortAudio::get_version_text() {
     return String(Pa_GetVersionText());
 }
@@ -387,6 +405,7 @@ Dictionary PortAudio::get_device_info(int p_device_index) {
     return device_info;
 }
 
+
 PortAudio::PortAudioError PortAudio::is_format_supported(Ref<PortAudioStreamParameter> p_input_stream_parameter,
                                                          Ref<PortAudioStreamParameter> p_output_stream_parameter,
                                                          double p_sample_rate) {
@@ -408,8 +427,7 @@ PortAudio::PortAudioError PortAudio::is_format_supported(Ref<PortAudioStreamPara
     return get_error(err);
 }
 
-PortAudio::PortAudioError
-PortAudio::open_stream(Ref<PortAudioStream> p_stream, Callable p_audio_callback, Variant p_user_data) {
+PortAudio::PortAudioError PortAudio::open_stream(Ref<PortAudioStream> p_stream, Callable p_audio_callback, Variant p_user_data) {
     if (p_audio_callback.is_null()) {
         return PortAudio::PortAudioError::INVALID_FUNC_REF;
     }
@@ -485,6 +503,178 @@ PortAudio::open_stream(Ref<PortAudioStream> p_stream, Callable p_audio_callback,
     }
     return get_error(err);
 }
+PortAudio::PortAudioError PortAudio::open_audio_server_stream(Ref<PortAudioStream> p_stream, PortAudioStreamParameter::PortAudioSampleFormat p_sample_format, Variant p_user_data) {
+	return open_default_stream(p_stream, p_sample_format, callable_mp(this, &PortAudio::internal_server_stream), p_user_data);
+}
+
+
+void PortAudio::init_main_stream()
+{
+	//virtual_audio_driver_ref = p_v_driver;
+	main_stream.instantiate();
+
+	//StringName samplerate_setting = "audio/driver/mix_rate";
+	//int _mix_rate_idx = GLOBAL_GET(samplerate_setting);
+	// in pro audio we call it sample rate!
+	//if (!ProjectSettings::get_singleton()->has_setting(samplerate_setting))
+	//{
+		StringName samplerate_setting = "audio/driver/sample_rate";
+		int _mix_rate_idx = GLOBAL_GET(samplerate_setting);
+	//}
+
+	int _mix_rate = standard_sample_rates[_mix_rate_idx];
+	int current_host_api = (int)GLOBAL_GET("audio/driver/audio_driver");
+	String current_device_name = (StringName)GLOBAL_GET("audio/driver/device");
+
+	// In the case of invalid mix rate, let's default to a sensible value..
+	if (_mix_rate <= 0) {
+		WARN_PRINT(vformat("Invalid mix rate of %d, consider reassigning setting \'%s\'. \nDefaulting mix rate to value %d.",
+			_mix_rate, samplerate_setting, AudioDriverManager::DEFAULT_MIX_RATE));
+		_mix_rate = AudioDriverManager::DEFAULT_MIX_RATE;
+	}
+
+	int device_idx = 0;
+	int input_channels = 0;
+	int output_channels = 2;
+
+	for (auto i = 0; i < get_device_count(); ++i)
+	{
+		Dictionary device_info = PortAudio::get_singleton()->get_device_info(i);
+		if ((int)device_info["host_api"] != current_host_api)
+			continue;
+
+		if (device_info["name"] == current_device_name)
+		{
+			device_idx = i;
+			int input_channels = device_info["max_input_channels"];
+			int output_channels = device_info["max_output_channels"];
+			break;
+		}
+	}
+
+	Ref<PortAudioStreamParameter> input_stream_parameter;
+	input_stream_parameter.instantiate();
+
+	input_stream_parameter->set_device_index(device_idx);
+	input_stream_parameter->set_channel_count(input_channels);
+
+	get_main_stream()->set_input_stream_parameter(input_stream_parameter);
+
+	Ref<PortAudioStreamParameter> output_stream_parameter;
+	output_stream_parameter.instantiate();
+
+	output_stream_parameter->set_device_index(device_idx);
+	output_stream_parameter->set_channel_count(output_channels);
+
+	get_main_stream()->set_output_stream_parameter(output_stream_parameter);
+
+	ERR_FAIL_COND(_mix_rate == 0);
+	get_main_stream()->set_sample_rate(_mix_rate);
+
+	int frames_per_block = get_samples_per_block();
+	get_main_stream()->set_frames_per_buffer(frames_per_block * stream_resolution[bytes_per_sample]);
+
+	frames_per_block *= MAX(input_channels, output_channels);
+	//virtual_audio_driver_ref->buffer.resize_zeroed(frames_per_block);
+	//virtual_audio_driver_ref->ring_buffer_in.resize_zeroed(frames_per_block);
+	//virtual_audio_driver_ref->ring_buffer_out.resize_zeroed(frames_per_block);
+	//p_v_driver->buffer.resize_zeroed(frames_per_block);
+	//buffer.resize_zeroed(frames_per_block);
+	ring_buffer_in.resize_zeroed(frames_per_block);
+	ring_buffer_out.resize_zeroed(frames_per_block);
+
+	open_audio_server_stream(get_main_stream(), PortAudioStreamParameter::INT_32, Variant());
+}
+
+int PortAudio::get_main_stream_input_buffer(int32_t* r_buffer, int buffer_size)
+{
+	if (!ring_buffer_in_ready.is_set())
+		return 0;
+
+	const int bus_count = AudioServer::get_singleton()->get_bus_count();
+	if (bus_count < 1)
+		return 0;
+
+
+	// To avoid dead-locks pre-check if any channel is currently active
+	// if not, avoid any further ring-buffer interactions
+	bool any_channel_active = false;
+	/*for (auto i = 0; i < bus_count; ++i)
+	{
+		if (AudioServer::get_singleton()->get_bus(i)->channels.size() < 1)
+			continue;
+
+		for (auto ch = 0; ch < AudioServer::get_singleton()->get_bus(i)->channels.size(); ++ch)
+		{
+			if (AudioServer::get_singleton()->get_bus(i)->channels[ch].active)
+			{
+				any_channel_active = true;
+				break;
+			}
+		}
+		if (any_channel_active)
+			break;
+	}
+
+	if (!any_channel_active)
+		return 0;*/
+
+	for (auto i = 0; i < buffer_size; ++i)
+		r_buffer[i] = ring_buffer_in[i];
+
+	return buffer_size;
+}
+
+void PortAudio::push_main_stream_buffer(int32_t* p_buffer, int buffer_size)
+{
+	for (auto i = 0; i < buffer_size; ++i)
+		ring_buffer_out.set(i, p_buffer[i]);
+	ring_buffer_out_ready.set();
+}
+
+Ref<PortAudioStream> PortAudio::get_main_stream()
+{
+	return main_stream;
+}
+
+PortAudio::PortAudioCallbackResult PortAudio::internal_server_stream(const Ref<PortAudioCallbackData>& p_data) {
+	Ref<PortAudioCallbackData> data(p_data);
+	ERR_FAIL_COND_V(data.is_null(), PortAudio::PortAudioCallbackResult::ABORT);
+
+	const StringName driver_name = AudioDriver::get_singleton()->get_name();
+	if (driver_name != "PortAudio" || !ready || pause_main_stream.is_set())
+		return PortAudio::PortAudioCallbackResult::CONTINUE;
+
+	
+	if (input_started)
+	{
+		Ref<StreamPeerBuffer> in_buffer = data->get_input_buffer();
+		for (auto& s : ring_buffer_in)
+			s = in_buffer->get_32();
+	}
+	else
+	{
+		for (auto& s : ring_buffer_in)
+			s = 0;
+	}
+	VirtualAudioDriver* va_driver = static_cast<VirtualAudioDriver*> (AudioDriver::get_singleton());
+	ring_buffer_in_ready.set();
+	va_driver->trigger_process_samples();
+	//va_driver->semaphore.post();
+	
+	if (ring_buffer_out_ready.is_set())
+	{
+		Ref<StreamPeerBuffer> out_buffer = data->get_output_buffer();
+		for (auto& s : ring_buffer_out)
+			out_buffer->put_32(s);
+	}
+	//if (!virtual_audio_driver_ref)
+	//	return PortAudio::PortAudioCallbackResult::ABORT;
+
+	if (exit_main_stream.is_set())
+		return PortAudio::PortAudioCallbackResult::ABORT;
+	return PortAudio::PortAudioCallbackResult::CONTINUE;
+}
 
 PortAudio::PortAudioError PortAudio::open_default_stream(Ref<PortAudioStream> p_stream,
                                                          PortAudioStreamParameter::PortAudioSampleFormat p_sample_format,
@@ -541,6 +731,42 @@ PortAudio::PortAudioError PortAudio::open_default_stream(Ref<PortAudioStream> p_
         data_map.insert(std::pair<Ref<PortAudioStream>, void *>(p_stream, user_data));
     }
     return get_error(err);
+}
+
+PortAudio::PortAudioError PortAudio::start_main_stream()
+{
+	//ERR_FAIL_COND_V(virtual_audio_driver_ref == nullptr, PortAudio::NOT_INITIALIZED);
+	ERR_FAIL_COND_V(get_main_stream().is_null(), PortAudio::NOT_INITIALIZED);
+	return start_stream(main_stream);
+}
+
+PortAudio::PortAudioError PortAudio::stop_main_stream()
+{
+	//ERR_FAIL_COND_V(virtual_audio_driver_ref == nullptr, PortAudio::NOT_INITIALIZED);
+	ERR_FAIL_COND_V(get_main_stream().is_null(), PortAudio::NOT_INITIALIZED);
+	return stop_stream(main_stream);
+}
+
+PortAudio::PortAudioError PortAudio::finish_main_stream()
+{
+	//ERR_FAIL_COND_V(virtual_audio_driver_ref == nullptr, PortAudio::NOT_INITIALIZED);
+	ERR_FAIL_COND_V(get_main_stream().is_null(), PortAudio::NOT_INITIALIZED);
+
+	if (main_stream.is_null())
+	{
+		//virtual_audio_driver_ref = nullptr;
+		return PortAudio::NOT_INITIALIZED;
+	}
+
+	exit_main_stream.set();
+
+	if (is_stream_active(main_stream))
+		stop_main_stream();
+
+	close_stream(main_stream);
+	//virtual_audio_driver_ref = nullptr;
+	main_stream.unref();
+	return PortAudio::PortAudioError::NO_ERROR;
 }
 
 PortAudio::PortAudioError PortAudio::start_stream(Ref<PortAudioStream> p_stream) {
@@ -784,6 +1010,7 @@ void PortAudio::_bind_methods() {
     ClassDB::bind_method(D_METHOD("util_write_buffer", "source", "destination", "length"),
                          &PortAudio::util_write_buffer);
 
+
     // PortAudioError - Custom
     BIND_ENUM_CONSTANT(UNDEFINED);
     BIND_ENUM_CONSTANT(NOT_PORT_AUDIO_NODE);
@@ -828,31 +1055,349 @@ void PortAudio::_bind_methods() {
     BIND_ENUM_CONSTANT(ABORT);
 }
 
+void PortAudio::_notification(int p_what)
+{
+	switch (p_what)
+	{
+	case NOTIFICATION_POSTINITIALIZE:
+		ready = true;
+	default:
+		break;
+	}
+}
+
+void PortAudio::editor_node_register_signal(Object* p_ref)
+{
+	ERR_FAIL_COND(p_ref == nullptr);
+	p_ref->connect("project_settings_changed", callable_mp(this, &PortAudio::on_project_settings_changed_editor));
+}
+
+// Editor Node Callback
+void PortAudio::on_project_settings_changed_editor()
+{
+	const int host_api_idx = GLOBAL_GET("audio/driver/audio_driver");
+	AudioDriver* current_driver = AudioDriverManager::get_driver(host_api_idx);
+	ProjectSettings::get_singleton()->set_setting("audio/driver/driver", current_driver->get_name());
+
+	if (bytes_per_sample != (int)GLOBAL_GET("audio/driver/stream_resolution"))
+	{
+		bytes_per_sample = GLOBAL_GET("audio/driver/stream_resolution");
+		if (current_driver->get_name() == "PortAudio")
+		{
+			VirtualAudioDriver* va = static_cast<VirtualAudioDriver*>(current_driver);
+			va->set_stream_resolution(stream_resolution[bytes_per_sample]);
+		}
+	}
+
+	//on_project_settings_changed("audio/driver/host_api");
+	//on_project_settings_changed("audio/driver/mix_rate");
+}
+
+void PortAudio::on_project_settings_changed(String p_setting)
+{
+	/*
+	if (p_setting == "audio/driver/mix_rate")
+	{
+		// =======================================
+		// Clear original settings entry
+		ProjectSettings::get_singleton()->set_as_internal("audio/driver/mix_rate", true);
+		const double mix_rate = GLOBAL_GET("audio/driver/mix_rate");
+		int sample_rate_idx = 0;
+		for (auto i = 1; i < standard_sample_rates.size(); ++i)
+		{
+			if (mix_rate < standard_sample_rates[i - 1] || mix_rate >= standard_sample_rates[i])
+				continue;
+
+			sample_rate_idx = (mix_rate - standard_sample_rates[i - 1]) < (standard_sample_rates[i] - mix_rate) ? i - 1 : i;
+			break;			
+		}
+		if ((int)GLOBAL_GET("audio/driver/sample_rate") != sample_rate_idx)
+			ProjectSettings::get_singleton()->set_setting("audio/driver/sample_rate", sample_rate_idx);
+		return;
+		// =======================================
+	}
+
+	const int stored_device_idx = (int)GLOBAL_GET("audio/driver/" + host_api_names[(int)GLOBAL_GET("audio/driver/host_api")] + "_selected_device");
+	// =======================================
+	if (p_setting == "audio/driver/host_api" && (int)GLOBAL_GET("audio/driver/host_api") != current_driver_idx)
+	{
+		const int stored_current_driver_idx = GLOBAL_GET("audio/driver/host_api");
+		reload_audio_driver(stored_current_driver_idx, stored_device_idx);
+	}
+	else if (p_setting == "audio/driver/device" && stored_device_idx != current_device_index)
+	{
+		const String current_device_idx = GLOBAL_GET("audio/driver/device");
+		const int stored_current_driver_idx = GLOBAL_GET("audio/driver/host_api");
+		reload_audio_driver(stored_current_driver_idx, stored_device_idx);
+	}
+	else if (p_setting == "audio/driver/sample_rate")
+	{
+		const double sample_rate = PortAudio::get_singleton()->get_main_stream()->get_sample_rate();
+		int sample_rate_idx = 0;
+		for (auto i = 1; i < standard_sample_rates.size(); ++i)
+		{
+			if (sample_rate < standard_sample_rates[i - 1] || sample_rate >= standard_sample_rates[i])
+				continue;
+
+			sample_rate_idx = (sample_rate - standard_sample_rates[i - 1]) < (standard_sample_rates[i] - sample_rate) ? i - 1 : i;
+			break;
+		}
+		if ((int)GLOBAL_GET("audio/driver/sample_rate") != sample_rate_idx)
+			reload_audio_driver(current_driver_idx, stored_device_idx);
+	}*/
+}
+
+void PortAudio::change_audio_driver(const int p_stored_current_driver_idx, const int p_device_idx)
+{
+	if (current_driver_idx != p_stored_current_driver_idx)
+	{
+		const StringName new_hostname = host_api_names[p_stored_current_driver_idx];
+		PackedStringArray host_device_names = host_devices_names[p_stored_current_driver_idx];
+
+		String host_device_enum;
+		for (auto& name : host_device_names)
+			host_device_enum += name + ",";
+		host_device_enum.remove_at(host_device_enum.size() - 1);
+
+		current_device_index = GLOBAL_GET("audio/driver/" + new_hostname + "_selected_device");
+
+		current_driver_idx = p_stored_current_driver_idx;
+	}
+	ProjectSettings::get_singleton()->set_setting("audio/driver/device", host_devices_names[current_driver_idx][p_device_idx]);
+
+	//current_devices_idx[current_driver_idx] = p_device_idx;
+
+	if (main_stream.is_null())
+		return;
+
+	main_stream->get_input_stream_parameter()->set_device_index(host_devices_name_idx[current_driver_idx][p_device_idx]);
+	main_stream->get_output_stream_parameter()->set_device_index(host_devices_name_idx[current_driver_idx][p_device_idx]);
+
+
+	//native_streaming = true;
+
+	/*for (auto k = 0; k < AudioDriverManager::get_driver_count(); ++k)
+	{
+		AudioDriver* audio_driver = AudioDriverManager::get_driver(k);
+		audio_driver->lock();
+		audio_driver->finish();
+		audio_driver->unlock();
+	}
+
+	for (auto i = 0; i < AudioDriverManager::get_driver_count(); ++i)
+	{
+		if (host_api_names[current_driver_idx] == AudioDriverManager::get_driver(i)->get_name())
+		{
+			AudioDriverManager::initialize(i);
+			AudioDriver::get_singleton()->start();
+			return;
+		}
+	}
+
+	for (auto i = 0; i < AudioDriverManager::get_driver_count(); ++i)
+	{
+		String name = AudioDriverManager::get_driver(i)->get_name();
+		if (name == "PortAudio")
+		{			
+			native_streaming = false;
+			AudioDriverManager::initialize(i);
+			AudioDriver::get_singleton()->start();
+			return;
+		}
+	}*/
+}
+
+String PortAudio::get_device_by_index_for_host(int p_current_host_api, int p_current_device_idx) const
+{
+	return host_devices_names[p_current_host_api][p_current_device_idx];
+}
+
+int PortAudio::get_samples_per_block()
+{
+	return get_samples_per_block(current_device_index);
+}
+
+int PortAudio::get_samples_per_block(const int p_device_index)
+{
+	long preferred_buffer_size_frames;
+#if PA_ASIO
+	if (host_api_names[current_driver_idx] == "ASIO")
+	{
+		long min_buffer_size_frames;
+		long max_buffer_size_frames;
+		long granularity;
+		PaAsio_GetAvailableBufferSizes(p_device_index, &min_buffer_size_frames, &max_buffer_size_frames, &preferred_buffer_size_frames, &granularity);
+	}
+	else
+	{
+#endif
+		preferred_buffer_size_frames = standard_samples_per_block[GLOBAL_GET("audio/driver/samples_per_block")];
+#if PA_ASIO
+	}
+#endif
+	
+	return preferred_buffer_size_frames;
+}
+PackedInt32Array PortAudio::get_available_buffer_sizes()
+{
+	return get_available_buffer_sizes(current_device_index);
+}
+
+PackedInt32Array PortAudio::get_available_buffer_sizes(const int p_device_index)
+{
+	if (host_api_names[p_device_index] != "ASIO")
+		return standard_samples_per_block;
+
+	long min_buffer_size_frames;
+	long max_buffer_size_frames;
+	long preferred_buffer_size_frames;
+	long granularity;
+	PaAsio_GetAvailableBufferSizes(p_device_index, &min_buffer_size_frames, &max_buffer_size_frames, &preferred_buffer_size_frames, &granularity);
+	PackedInt32Array result;
+
+	int i = 0;
+	while (i < max_buffer_size_frames - min_buffer_size_frames)
+	{
+		result.append(min_buffer_size_frames + i);
+		if (granularity != -1)
+			i += granularity;
+		else
+			i = result[result.size() - 1];
+	}
+	result.append(max_buffer_size_frames);
+	return result;
+}
+
+void PortAudio::show_asio_control_panel()
+{
+	PaError err = PaAsio_ShowControlPanel(current_device_index, nullptr);
+	ERR_FAIL_COND(err != paNoError);
+}
+//PaError 	PaAsio_GetInputChannelName(PaDeviceIndex device, int channelIndex, const char** channelName)
+//PaError 	PaAsio_GetOutputChannelName(PaDeviceIndex device, int channelIndex, const char** channelName)
+void PortAudio::set_main_stream_mix_rate(double p_mix_rate)
+{
+	if (main_stream.is_null())
+		return;
+	PaError result = PaAsio_SetStreamSampleRate(main_stream->get_stream(), p_mix_rate);
+	if (result != paNoError)
+	{
+		stop_stream(main_stream);
+	}
+	main_stream->set_sample_rate(p_mix_rate);
+}
+
 PortAudio::PortAudio() {
+
     singleton = this;
+
+	// =======================================
+	// Initialize Portaudio
     PortAudio::PortAudioError err = initialize();
+
     if (err != PortAudio::PortAudioError::NO_ERROR) {
         print_error(vformat("PortAudio::PortAudio: failed to initialize (%d)", err));
 		return;
     }
+	// =======================================
 
+	// =======================================
+	// Connect to ProjectSettings on changed
+	if (ProjectSettings::get_singleton())
+		ProjectSettings::get_singleton()->connect("project_settings_changed", callable_mp(this, &PortAudio::on_project_settings_changed));
+	// =======================================
+
+
+	// =======================================
+	// Configure Host APIs
+	// Store host api idx and name
+	host_api_names.clear();
+	host_devices_names.clear();
+	host_devices_name_idx.clear();
+	String host_api_enums;
 	
-	const String current_driver = AudioDriverManager::get_driver_count() > 0 ? AudioDriverManager::get_driver(0)->get_name() : ""; // GLOBAL_GET("audio/driver/driver");
-	String driver_enums;
-	//ProjectSettings::get_singleton()->clear("audio/driver/driver");
 	for (auto i = 0; i < get_host_api_count(); ++i)
 	{
 		Dictionary host_info = get_host_api_info(i);
-		driver_enums += String(host_info["name"]) + String(",");
+		String host_name = String(host_info["name"]);
+		GLOBAL_DEF_INTERNAL(PropertyInfo(Variant::STRING, "audio/driver/" + host_name + "_selected_device"), "");
+		host_api_enums += host_name + String(",");
+		host_api_names.append(host_name);
+
+		PackedStringArray devices_names;
+		PackedInt32Array devices_names_idx;
+		for (auto i = 0; i < get_device_count(); ++i)
+		{
+			Dictionary device_info = get_device_info(i);
+			if ((int)device_info["host_api"] != i)
+				continue;
+
+			devices_names.append(device_info["name"]);
+			devices_names_idx.append(i);
+		}
+		host_devices_names.append(devices_names);
+		host_devices_name_idx.append(devices_names_idx);
 	}
-	if (!current_driver.is_empty())
-		driver_enums += current_driver;
-	//else
-	//	driver_enums.remove_at(driver_enums.length() - 1);
-	GLOBAL_DEF_BASIC(PropertyInfo(Variant::INT, "audio/driver/pro_audio_driver", PROPERTY_HINT_ENUM, driver_enums),0);
+
+	String driver_enums;
+	for (auto i = 0; i < AudioDriverManager::get_driver_count(); ++i)
+	{
+		String host_name = AudioDriverManager::get_driver(i)->get_name();
+		if (host_name == "Dummy")
+			continue;
+		GLOBAL_DEF_INTERNAL(PropertyInfo(Variant::STRING, "audio/driver/" + host_name + "_selected_device"), "");
+		driver_enums += host_name + String(",");
+		if (host_name != "PortAudio" && !host_name.is_empty())
+		{
+			host_api_enums += host_name + String(",");
+			host_api_names.append(host_name);
+
+			PackedStringArray drivers_output_devices = AudioDriverManager::get_driver(i)->get_output_device_list();
+
+			PackedStringArray devices_names;
+			for (auto i = 0; i < drivers_output_devices.size(); ++i)
+				devices_names.append(drivers_output_devices[i]);
+
+			host_devices_names.append(devices_names);
+		}
+	}
+	driver_enums.remove_at(driver_enums.length() - 1);
+	GLOBAL_DEF_RST_NOVAL(PropertyInfo(Variant::INT, "audio/driver/audio_driver", PROPERTY_HINT_ENUM, driver_enums), 0);
+	// =======================================
+
+	// =======================================
+	// Correct last comma (,)
+	host_api_enums.remove_at(host_api_enums.size() - 1);
+	GLOBAL_DEF_INTERNAL(PropertyInfo(Variant::INT, "audio/driver/host_api", PROPERTY_HINT_ENUM, host_api_enums), 0);
+	// =======================================
+
+	// =======================================
+	// Configure samplerate and samples per block
+	String samplesperblock;
+	for (auto i = 0; i < standard_samples_per_block.size(); ++i)
+		samplesperblock += String::num(standard_samples_per_block[i], 1) + ",";
+	samplesperblock.remove_at(samplesperblock.size() - 1);
+
+	String samplerates;
+	for (auto i = 0; i < standard_sample_rates.size(); ++i)
+		samplerates += String::num(standard_sample_rates[i], 1) + ",";
+	samplerates.remove_at(samplerates.size() - 1);
+
+	GLOBAL_DEF_INTERNAL(PropertyInfo(Variant::STRING, "audio/driver/device"), "");
+
+	GLOBAL_DEF_INTERNAL(PropertyInfo(Variant::INT, "audio/driver/samples_per_block", PROPERTY_HINT_ENUM, samplesperblock), 8);
+	GLOBAL_DEF_INTERNAL(PropertyInfo(Variant::INT, "audio/driver/sample_rate", PROPERTY_HINT_ENUM, samplerates), 8);
+	GLOBAL_DEF_INTERNAL(PropertyInfo(Variant::INT, "audio/driver/stream_resolution", PROPERTY_HINT_ENUM, "32bit (float), 32bit, 24bit, 16bit, 8bit, u8bit"), 0);
+
+	// =======================================
+	// Init pre-last driver
+	// last one is always dummy
+	//AudioDriverManager::initialize(AudioDriverManager::get_driver_count() - 2);
+	// =======================================
 }
 
 PortAudio::~PortAudio() {
+	finish_main_stream();
     PortAudio::PortAudioError err = terminate();
     if (err != PortAudio::PortAudioError::NO_ERROR) {
         print_error(vformat("PortAudio::PortAudio: failed to terminate (%d)", err));
