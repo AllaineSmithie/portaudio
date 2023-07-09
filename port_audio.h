@@ -4,14 +4,13 @@
 #ifdef PORT_AUDIO
 #include "port_audio_stream.h"
 
+#include "core/io/stream_peer.h"
 #include "core/object/object.h"
+#include "drivers/portaudio/virtual_audio_driver.h"
 #include "port_audio_callback_data.h"
 #include "servers/audio_server.h"
-#include "drivers/portaudio/virtual_audio_driver.h"
-#include "core/io/stream_peer.h"
 
 #include <map>
-
 
 class PortAudioVirtualDriver;
 
@@ -21,6 +20,7 @@ class PortAudio : public Object {
 	friend class PortAudioVirtualDriver;
 	friend class EditorNode;
 	Ref<PortAudioStream> main_stream;
+
 public:
 	const PackedFloat64Array standard_sample_rates = {
 		8000.0,
@@ -35,11 +35,12 @@ public:
 		48000.0,
 		88200.0,
 		96000.0,
-		192000.0 };
+		192000.0
+	};
 	const PackedInt32Array standard_samples_per_block = {
 		32, 48, 64, 96, 128, 196, 256, 384, 512, 768, 1024, 1536, 2048
 	};
-	const PackedInt32Array stream_resolution = { 4,4, 3, 2, 1, 1 };
+	const PackedInt32Array stream_resolution = { 4, 4, 3, 2, 1, 1 };
 	enum PortAudioError {
 		// Custom Error
 		UNDEFINED = -1,
@@ -86,9 +87,7 @@ public:
 		ABORT = 2,
 	};
 
-
-	enum StandardSampleRates
-	{
+	enum StandardSampleRates {
 		SAMPLERATE_8000_0,
 		SAMPLERATE_9600_0,
 		SAMPLERATE_11025_0,
@@ -104,8 +103,7 @@ public:
 		SAMPLERATE_192000_0,
 	};
 
-	enum SamplesPerBlock
-	{
+	enum SamplesPerBlock {
 		SAMPLES_PER_BLOCK_32,
 		SAMPLES_PER_BLOCK_48,
 		SAMPLES_PER_BLOCK_64,
@@ -120,8 +118,9 @@ public:
 		SAMPLES_PER_BLOCK_1536,
 		SAMPLES_PER_BLOCK_2048,
 	};
+
 private:
-	static PortAudio* singleton;
+	static PortAudio *singleton;
 	bool initialized = false;
 	bool ready = false;
 	int bytes_per_sample = 4;
@@ -132,7 +131,7 @@ private:
 	Vector<PackedStringArray> host_devices_names;
 	Vector<PackedInt32Array> host_devices_name_idx;
 	int samples_per_block = 512;
-	
+
 	short current_device_index = 0;
 
 	PackedInt32Array ring_buffer_in;
@@ -142,10 +141,10 @@ private:
 	// builtin-driver or PortAudio
 	//bool native_streaming = false;
 
-	void editor_node_register_signal(Object* p_ref);
+	void editor_node_register_signal(Object *p_ref);
 	void on_project_settings_changed_editor();
 
-	PortAudio::PortAudioCallbackResult internal_server_stream(const Ref<PortAudioCallbackData>& p_data);
+	PortAudio::PortAudioCallbackResult internal_server_stream(const Ref<PortAudioCallbackData> &p_data);
 
 	void init_main_stream();
 	PortAudio::PortAudioError start_main_stream();
@@ -165,9 +164,9 @@ public:
 	SafeFlag pause_main_stream;
 	static PortAudio *get_singleton();
 
-	int get_main_stream_input_buffer(int32_t* r_buffer, int buffer_size);
+	int get_main_stream_input_buffer(int32_t *r_buffer, int buffer_size);
 	//const PackedInt32Array& get_main_stream_input_buffer();
-	void push_main_stream_buffer(int32_t* p_buffer, int buffer_size);
+	void push_main_stream_buffer(int32_t *p_buffer, int buffer_size);
 	Ref<PortAudioStream> get_main_stream();
 
 	String get_device_by_index_for_host(int p_current_host_api, int p_current_device_idx) const;
@@ -225,8 +224,6 @@ public:
 	PortAudio::PortAudioError util_enable_exclusive_mode(Ref<PortAudioStreamParameter> p_stream_parameter);
 	void util_insert_buffer(Ref<StreamPeerBuffer> p_source, int p_source_offset, Ref<StreamPeerBuffer> p_destination, int p_destination_offset, int p_length);
 	void util_write_buffer(Ref<StreamPeerBuffer> p_source, Ref<StreamPeerBuffer> p_destination, int p_length);
-
-	
 
 	PortAudio();
 	~PortAudio();
