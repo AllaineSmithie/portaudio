@@ -8,15 +8,7 @@
 #include "core/os/memory.h"
 #include "core/os/os.h"
 
-#ifdef PA_USE_WASAPI
-#include <pa_win_wasapi.h>
-#endif
-
-#ifdef WIN32
-//#ifdef PA_USE_ASIO
-#include "portaudio/include/pa_asio.h"
-//#endif
-#endif
+#include "port_audio_headers.h"
 #include "portaudio/include/portaudio.h"
 #include <servers/audio_server.h>
 
@@ -535,8 +527,8 @@ void PortAudio::init_main_stream() {
 
 		if (device_info["name"] == current_device_name) {
 			device_idx = i;
-			int input_channels = device_info["max_input_channels"];
-			int output_channels = device_info["max_output_channels"];
+			input_channels = device_info["max_input_channels"];
+			output_channels = device_info["max_output_channels"];
 			break;
 		}
 	}
@@ -585,8 +577,8 @@ int PortAudio::get_main_stream_input_buffer(int32_t *r_buffer, int buffer_size) 
 
 	// To avoid dead-locks pre-check if any channel is currently active
 	// if not, avoid any further ring-buffer interactions
-	bool any_channel_active = false;
-	/*for (auto i = 0; i < bus_count; ++i)
+	/* bool any_channel_active = false;
+	for (auto i = 0; i < bus_count; ++i)
 	{
 		if (AudioServer::get_singleton()->get_bus(i)->channels.size() < 1)
 			continue;
@@ -1051,7 +1043,8 @@ void PortAudio::on_project_settings_changed_editor() {
 
 	if (bytes_per_sample != (int)GLOBAL_GET("audio/driver/stream_resolution")) {
 		bytes_per_sample = GLOBAL_GET("audio/driver/stream_resolution");
-		if (current_driver->get_name() == "PortAudio") {
+		const String driver_name = current_driver->get_name();
+		if (driver_name == "PortAudio") {
 			VirtualAudioDriver *va = static_cast<VirtualAudioDriver *>(current_driver);
 			va->set_stream_resolution(stream_resolution[bytes_per_sample]);
 		}
@@ -1275,13 +1268,13 @@ PortAudio::PortAudio() {
 
 		PackedStringArray devices_names;
 		PackedInt32Array devices_names_idx;
-		for (auto i = 0; i < get_device_count(); ++i) {
-			Dictionary device_info = get_device_info(i);
-			if ((int)device_info["host_api"] != i)
+		for (auto d = 0; d < get_device_count(); ++d) {
+			Dictionary device_info = get_device_info(d);
+			if ((int)device_info["host_api"] != d)
 				continue;
 
 			devices_names.append(device_info["name"]);
-			devices_names_idx.append(i);
+			devices_names_idx.append(d);
 		}
 		host_devices_names.append(devices_names);
 		host_devices_name_idx.append(devices_names_idx);
@@ -1301,8 +1294,8 @@ PortAudio::PortAudio() {
 			PackedStringArray drivers_output_devices = AudioDriverManager::get_driver(i)->get_output_device_list();
 
 			PackedStringArray devices_names;
-			for (auto i = 0; i < drivers_output_devices.size(); ++i)
-				devices_names.append(drivers_output_devices[i]);
+			for (auto d = 0; d < drivers_output_devices.size(); ++d)
+				devices_names.append(drivers_output_devices[d]);
 
 			host_devices_names.append(devices_names);
 		}
