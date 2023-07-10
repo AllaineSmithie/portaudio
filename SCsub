@@ -209,6 +209,7 @@ if env["portaudio"]:
       host_api_sources.append(pa_root + "/src/hostapi/oss/recplay.c")
 
   pa_sources.append(host_api_sources)
+  module_env.disable_warnings()
   module_env.add_source_files(env.modules_sources, pa_sources)
   # Portaudio Setup - End
 
